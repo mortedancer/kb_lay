@@ -1,62 +1,87 @@
 # kb_lay
 
-Tiny Windows background process: **select text → press a hotkey → convert between EN/RU keyboard layouts**.
+Tiny Windows tray app: **select mistyped text → double-tap Ctrl → remap EN ↔ RU**.
 
-Выделите текст, нажмите **Ctrl, Ctrl** — раскладка выделенного текста переключается (ghbdtn → привет, руддщ → hello).
+Выделите текст, нажмите **Ctrl, Ctrl** — как будто набрали на другой раскладке (`ghbdtn` → `привет`, `руддщ` → `hello`).
 
-Idle cost is one hidden window sitting in `GetMessage` (~0% CPU, a few MB of RAM, no .NET, no service host).
+One hidden window in `GetMessage`: ~0% CPU idle, a few MB RAM, ~150 KB exe, no .NET.
 
-## Why this is not a Windows Service
+This is a **user-session** process (tray icon), not a `services.msc` service. Session-0 services cannot see desktop hotkeys, the clipboard, or the focused app. `--install` puts it in `HKCU\...\Run` so it starts at logon.
 
-A real `services.msc` service runs in Session 0. It cannot:
+## Use
 
-- receive your desktop hotkeys
-- read/write the interactive clipboard
-- send Ctrl+C / Ctrl+V to the focused app
+1. Select the text that was typed in the wrong layout.
+2. Double-tap **Ctrl** (either side, two taps within 500 ms).
+3. The selection is replaced. The previous clipboard is restored.
+4. By default the focused window also switches to that language so you can keep typing.
 
-So kb_lay is a **user-session resident process** (tray icon). `--install` registers it in `HKCU\...\Run` so it starts at logon — the usual pattern for this kind of tool.
+`Ctrl+C` / `Ctrl+V` are not treated as taps.
 
-## Usage
+| Typed (wrong layout) | Result |
+|---|---|
+| `ghbdtn` | `привет` |
+| `руддщ` | `hello` |
+| `Ghbdtn` | `Привет` |
+
+Layouts: **English (US)** QWERTY ↔ **Russian** JCUKEN. Nothing else.
+
+## Install
 
 ```text
-kb_lay                         run in background
+kb_lay                         run in the tray
 kb_lay --install               copy to %LOCALAPPDATA%\kb_lay and start with Windows
-kb_lay --install --hotkey=caps same, with a custom hotkey
-kb_lay --uninstall             remove startup entry and stop
+kb_lay --uninstall             remove startup and stop
 kb_lay --quit                  stop the running instance
-kb_lay --hotkey=ctrl+ctrl      override hotkey for this run
-kb_lay --switch-layout         after paste, switch input layout to the decoded language (default)
-kb_lay --no-switch-layout      convert text only, leave the current layout alone
 kb_lay --help
 ```
 
-Default hotkey: **double-tap Ctrl** (either side, two taps within 500 ms). Ctrl+C / Ctrl+V are not treated as taps.
+Right-click the tray icon: **Switch layout after convert**, install, uninstall, exit.
 
-Other non-standard options: `lctrl+lctrl`, `rctrl+rctrl`, `alt+alt`, `shift+shift`, `caps` (tap Caps Lock; it will not toggle caps).
+A GitHub Actions artifact (`kb_lay.exe`) is built on every push to `main`.
 
-Ordinary combos still work: `pause`, `scrolllock`, `f12`, `ctrl+shift+q`, `ctrl+alt+r`, `win+shift+x`.
+## Options
 
-Right-click the tray icon for install / uninstall / exit.
+```text
+kb_lay --hotkey=ctrl+ctrl      default: double-tap Ctrl
+kb_lay --switch-layout         after paste, switch input layout (default)
+kb_lay --no-switch-layout      convert text only
+```
 
-## What it does
+`--install` stores the current hotkey and layout-switch flag in the Run key. Changing the tray checkbox updates that key if kb_lay is already installed.
 
-1. Copies the selection (`Ctrl+C`)
-2. Detects Latin vs Cyrillic majority
-3. Remaps characters US QWERTY ↔ Windows Russian (JCUKEN)
-4. Pastes back (`Ctrl+V`)
-5. Optionally switches the focused window to the matching input layout (EN or RU) so you can keep typing. Toggle from the tray menu, or `--no-switch-layout`.
+### Hotkeys
 
-The previous clipboard is restored after paste.
+| `--hotkey=` | Behavior |
+|---|---|
+| `ctrl+ctrl` | double-tap Ctrl, either side (default) |
+| `lctrl+lctrl` | left Ctrl only |
+| `rctrl+rctrl` | right Ctrl only |
+| `alt+alt` | double-tap Alt |
+| `shift+shift` | double-tap Shift |
+| `caps` | tap Caps Lock (does not toggle caps) |
+| `pause`, `scrolllock`, `f12` | single key via `RegisterHotKey` |
+| `ctrl+shift+q`, `ctrl+alt+r`, `win+shift+x` | ordinary combos |
 
-Works in most ordinary apps (browsers, Office, messengers, editors). Does **not** work in:
+## How it works
 
-- elevated windows, unless kb_lay itself is elevated (UIPI)
-- some games that swallow the hotkey
+1. Snapshot the clipboard (all HGLOBAL formats).
+2. Copy the selection (`WM_COPY`, then spaced Ctrl+C if needed — Chrome ignores a 4-key `SendInput` burst).
+3. Count Latin vs Cyrillic; remap through the US ↔ Russian key map.
+4. Paste (`WM_PASTE` or spaced Ctrl+V).
+5. If layout-switch is on, activate `00000409` (EN) or `00000419` (RU) on the focused window.
+6. Restore the clipboard snapshot.
+
+Native edit controls use `WM_COPY` / `WM_PASTE`. Browsers and most other apps use injected Ctrl+C / Ctrl+V.
+
+Does **not** work in:
+
+- elevated windows, unless kb_lay is elevated (UIPI)
+- some games that swallow input
 - consoles, where Ctrl+C is interrupt rather than copy
 
-Layouts: **English (US)** and **Russian**. Other layouts are out of scope on purpose.
-
 ## Build
+
+`build.bat` (MinGW `gcc` + `windres`, or MSVC `cl`).
 
 **MinGW**
 
@@ -66,8 +91,6 @@ gcc -finput-charset=UTF-8 -O2 -s -mwindows -static -o kb_lay.exe src\kb_lay.c kb
 gcc -finput-charset=UTF-8 -DKB_LAY_TEST -O2 -o kb_lay_test.exe src\kb_lay.c
 kb_lay_test.exe
 ```
-
-Or `build.bat`.
 
 **MSVC**
 
@@ -82,6 +105,10 @@ cl /nologo /utf-8 /O1 /W3 /DKB_LAY_TEST src\kb_lay.c /Fe:kb_lay_test.exe
 cmake -S . -B build
 cmake --build build --config Release
 ```
+
+`kb_lay.exe --selftest` creates a hidden EDIT, converts `ghbdtn` → `привет`, and checks the clipboard was restored.
+
+Tray icon: `tools/make_icon.ps1` writes `res/kb_lay.ico` (ImageMagick + GDI+).
 
 ## License
 

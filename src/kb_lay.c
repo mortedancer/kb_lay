@@ -933,14 +933,16 @@ static void show_help(void)
 {
     MessageBoxW(
         NULL,
-        L"kb_lay — convert selected text EN/RU (Windows US <-> Russian).\r\n\r\n"
-        L"Select text, double-tap Ctrl (default).\r\n\r\n"
+        L"kb_lay — convert selected text EN/RU (US QWERTY <-> Russian).\r\n\r\n"
+        L"Select text, double-tap Ctrl (default, 500 ms).\r\n"
+        L"Ctrl+C / Ctrl+V are not taps. Clipboard is restored after paste.\r\n\r\n"
         L"kb_lay\r\n"
         L"kb_lay --install [--hotkey=ctrl+ctrl] [--switch-layout]\r\n"
         L"kb_lay --uninstall\r\n"
         L"kb_lay --quit\r\n"
-        L"kb_lay --hotkey=ctrl+ctrl|lctrl+lctrl|rctrl+rctrl|alt+alt|caps|pause|f12\r\n"
-        L"kb_lay --switch-layout / --no-switch-layout\r\n",
+        L"kb_lay --hotkey=ctrl+ctrl|lctrl+lctrl|rctrl+rctrl|alt+alt|shift+shift|caps|pause|f12\r\n"
+        L"kb_lay --switch-layout (default) / --no-switch-layout\r\n"
+        L"Tray: Switch layout after convert, install, uninstall, exit.\r\n",
         L"kb_lay",
         MB_OK | MB_ICONINFORMATION);
 }
