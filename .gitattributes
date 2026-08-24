@@ -1,0 +1,10 @@
+* text=auto
+*.c text eol=lf
+*.h text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.cmake text eol=lf
+*.bat text eol=crlf
+CMakeLists.txt text eol=lf
+.gitignore text eol=lf
+LICENSE text eol=lf
