@@ -25,6 +25,8 @@ kb_lay --install --hotkey=caps same, with a custom hotkey
 kb_lay --uninstall             remove startup entry and stop
 kb_lay --quit                  stop the running instance
 kb_lay --hotkey=ctrl+ctrl      override hotkey for this run
+kb_lay --switch-layout         after paste, switch input layout to the decoded language (default)
+kb_lay --no-switch-layout      convert text only, leave the current layout alone
 kb_lay --help
 ```
 
@@ -42,7 +44,7 @@ Right-click the tray icon for install / uninstall / exit.
 2. Detects Latin vs Cyrillic majority
 3. Remaps characters US QWERTY ↔ Windows Russian (JCUKEN)
 4. Pastes back (`Ctrl+V`)
-5. Switches the foreground window to the matching input layout
+5. Optionally switches the focused window to the matching input layout (EN or RU) so you can keep typing. Toggle from the tray menu, or `--no-switch-layout`.
 
 The previous clipboard is restored after paste.
 

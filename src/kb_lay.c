@@ -155,7 +155,8 @@ int main(void)
 #define ID_HOTKEY  1
 #define IDM_INSTALL   10
 #define IDM_UNINSTALL 11
-#define IDM_EXIT      12
+#define IDM_SWITCH_LAYOUT 12
+#define IDM_EXIT      13
 #define IDI_KBLAY     101
 #define MAX_CONVERT   1000000
 #define MAX_CLIP_FMT  48
@@ -178,6 +179,7 @@ static UINT g_mods = MOD_NOREPEAT;
 static UINT g_vk;
 static int g_hk_mode = HK_DBL_CTRL;
 static wchar_t g_hotkey_spec[64] = L"ctrl+ctrl";
+static int g_switch_layout = 1;
 static int g_busy;
 static DWORD g_tap_at;
 static int g_tap_class;
@@ -648,12 +650,18 @@ static int clip_set(const wchar_t *s)
     return 1;
 }
 
-static void set_layout(int ru)
+static void set_layout(HWND fg, HWND tgt, int ru)
 {
-    HKL hkl = LoadKeyboardLayoutW(ru ? L"00000419" : L"00000409", KLF_SUBSTITUTE_OK);
-    HWND fg = GetForegroundWindow();
-    if (hkl && fg)
+    HKL hkl = LoadKeyboardLayoutW(
+        ru ? L"00000419" : L"00000409",
+        KLF_SUBSTITUTE_OK | KLF_ACTIVATE);
+    if (!hkl)
+        return;
+    ActivateKeyboardLayout(hkl, 0);
+    if (fg)
         PostMessageW(fg, WM_INPUTLANGCHANGEREQUEST, 0, (LPARAM)hkl);
+    if (tgt && tgt != fg)
+        PostMessageW(tgt, WM_INPUTLANGCHANGEREQUEST, 0, (LPARAM)hkl);
 }
 
 static void convert_selection(HWND force)
@@ -733,7 +741,8 @@ static void convert_selection(HWND force)
     else
         send_ctrl_vk('V');
 
-    set_layout(to_ru);
+    if (g_switch_layout && !force)
+        set_layout(fg, tgt, to_ru);
     Sleep(force ? 40 : 280);
 
     clip_restore(snap);
@@ -808,6 +817,36 @@ static void build_run_cmd(wchar_t *cmd, size_t cap, const wchar_t *exe)
     wcat(cmd, cap, L"\"");
     wcat(cmd, cap, L" --hotkey=");
     wcat(cmd, cap, g_hotkey_spec);
+    wcat(cmd, cap, g_switch_layout ? L" --switch-layout" : L" --no-switch-layout");
+}
+
+static int write_run_key(const wchar_t *cmd);
+
+static int run_key_exists(void)
+{
+    HKEY k;
+    LONG e;
+    if (RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            0, KEY_QUERY_VALUE, &k) != ERROR_SUCCESS)
+        return 0;
+    e = RegQueryValueExW(k, RUN_VALUE, NULL, NULL, NULL, NULL);
+    RegCloseKey(k);
+    return e == ERROR_SUCCESS;
+}
+
+static void persist_if_installed(void)
+{
+    wchar_t src[MAX_PATH], cmd[MAX_PATH + 96];
+    DWORD n;
+    if (!run_key_exists())
+        return;
+    n = GetModuleFileNameW(NULL, src, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH)
+        return;
+    build_run_cmd(cmd, MAX_PATH + 96, src);
+    write_run_key(cmd);
 }
 
 static int write_run_key(const wchar_t *cmd)
@@ -865,7 +904,8 @@ static void do_install(void)
     }
     MessageBoxW(
         NULL,
-        L"Installed. Select text and double-tap Ctrl (default) to convert EN/RU.",
+        L"Installed. Double-tap Ctrl to convert selected text EN/RU.\r\n"
+        L"Tray: toggle 'Switch layout after convert'.",
         L"kb_lay",
         MB_OK | MB_ICONINFORMATION);
 }
@@ -896,10 +936,11 @@ static void show_help(void)
         L"kb_lay — convert selected text EN/RU (Windows US <-> Russian).\r\n\r\n"
         L"Select text, double-tap Ctrl (default).\r\n\r\n"
         L"kb_lay\r\n"
-        L"kb_lay --install [--hotkey=ctrl+ctrl]\r\n"
+        L"kb_lay --install [--hotkey=ctrl+ctrl] [--switch-layout]\r\n"
         L"kb_lay --uninstall\r\n"
         L"kb_lay --quit\r\n"
-        L"kb_lay --hotkey=ctrl+ctrl|lctrl+lctrl|rctrl+rctrl|alt+alt|caps|pause|f12\r\n",
+        L"kb_lay --hotkey=ctrl+ctrl|lctrl+lctrl|rctrl+rctrl|alt+alt|caps|pause|f12\r\n"
+        L"kb_lay --switch-layout / --no-switch-layout\r\n",
         L"kb_lay",
         MB_OK | MB_ICONINFORMATION);
 }
@@ -925,8 +966,22 @@ static void tray_add(void)
     nid.hIcon = g_icon;
     wcopy(nid.szTip, 128, L"kb_lay  [");
     wcat(nid.szTip, 128, g_hotkey_spec);
-    wcat(nid.szTip, 128, L"]  convert selection EN/RU");
+    wcat(nid.szTip, 128, g_switch_layout ? L"]  convert + layout" : L"]  convert only");
     Shell_NotifyIconW(NIM_ADD, &nid);
+}
+
+static void tray_update_tip(void)
+{
+    NOTIFYICONDATAW nid;
+    memset(&nid, 0, sizeof(nid));
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = g_hwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_TIP;
+    wcopy(nid.szTip, 128, L"kb_lay  [");
+    wcat(nid.szTip, 128, g_hotkey_spec);
+    wcat(nid.szTip, 128, g_switch_layout ? L"]  convert + layout" : L"]  convert only");
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
 static void tray_del(void)
@@ -950,6 +1005,9 @@ static void show_menu(void)
     if (!m)
         return;
     GetCursorPos(&pt);
+    AppendMenuW(m, MF_STRING | (g_switch_layout ? MF_CHECKED : 0),
+                IDM_SWITCH_LAYOUT, L"Switch layout after convert");
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, IDM_INSTALL, L"Install at startup");
     AppendMenuW(m, MF_STRING, IDM_UNINSTALL, L"Uninstall");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
@@ -973,6 +1031,11 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_COMMAND:
         switch (LOWORD(wp)) {
+        case IDM_SWITCH_LAYOUT:
+            g_switch_layout = !g_switch_layout;
+            tray_update_tip();
+            persist_if_installed();
+            break;
         case IDM_INSTALL:
             do_install();
             break;
@@ -1091,6 +1154,16 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR raw, int show)
                     LocalFree(argv);
                     return 1;
                 }
+            } else if (!lstrcmpiW(argv[i], L"--switch-layout") ||
+                       !lstrcmpiW(argv[i], L"--switch-layout=1") ||
+                       !lstrcmpiW(argv[i], L"--switch-layout=on") ||
+                       !lstrcmpiW(argv[i], L"--switch-layout=yes")) {
+                g_switch_layout = 1;
+            } else if (!lstrcmpiW(argv[i], L"--no-switch-layout") ||
+                       !lstrcmpiW(argv[i], L"--switch-layout=0") ||
+                       !lstrcmpiW(argv[i], L"--switch-layout=off") ||
+                       !lstrcmpiW(argv[i], L"--switch-layout=no")) {
+                g_switch_layout = 0;
             }
         }
         LocalFree(argv);
