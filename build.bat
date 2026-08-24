@@ -16,7 +16,9 @@ gcc -finput-charset=UTF-8 -DKB_LAY_TEST -O2 -o kb_lay_test.exe src\kb_lay.c
 if errorlevel 1 exit /b 1
 kb_lay_test.exe
 if errorlevel 1 exit /b 1
-gcc -finput-charset=UTF-8 -O2 -s -mwindows -static -o kb_lay.exe src\kb_lay.c -luser32 -lshell32 -ladvapi32
+windres -I res res\kb_lay.rc -O coff -o kb_lay_res.o
+if errorlevel 1 exit /b 1
+gcc -finput-charset=UTF-8 -O2 -s -mwindows -static -o kb_lay.exe src\kb_lay.c kb_lay_res.o -luser32 -lshell32 -ladvapi32
 if errorlevel 1 exit /b 1
 echo built kb_lay.exe
 exit /b 0
@@ -26,7 +28,7 @@ cl /nologo /utf-8 /O1 /W3 /DKB_LAY_TEST src\kb_lay.c /Fe:kb_lay_test.exe
 if errorlevel 1 exit /b 1
 kb_lay_test.exe
 if errorlevel 1 exit /b 1
-cl /nologo /utf-8 /O1 /W3 src\kb_lay.c /Fe:kb_lay.exe user32.lib shell32.lib advapi32.lib /link /SUBSYSTEM:WINDOWS
+cl /nologo /utf-8 /O1 /W3 src\kb_lay.c res\kb_lay.rc /Fe:kb_lay.exe user32.lib shell32.lib advapi32.lib /link /SUBSYSTEM:WINDOWS
 if errorlevel 1 exit /b 1
 echo built kb_lay.exe
 exit /b 0

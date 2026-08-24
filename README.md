@@ -42,7 +42,7 @@ Right-click the tray icon for install / uninstall / exit.
 4. Pastes back (`Ctrl+V`)
 5. Switches the foreground window to the matching input layout
 
-The converted text stays on the clipboard.
+The previous clipboard is restored after paste.
 
 Works in most ordinary apps (browsers, Office, messengers, editors). Does **not** work in:
 
@@ -57,7 +57,8 @@ Layouts: **English (US)** and **Russian**. Other layouts are out of scope on pur
 **MinGW**
 
 ```bat
-gcc -finput-charset=UTF-8 -O2 -s -mwindows -static -o kb_lay.exe src\kb_lay.c -luser32 -lshell32 -ladvapi32
+windres -I res res\kb_lay.rc -O coff -o kb_lay_res.o
+gcc -finput-charset=UTF-8 -O2 -s -mwindows -static -o kb_lay.exe src\kb_lay.c kb_lay_res.o -luser32 -lshell32 -ladvapi32
 gcc -finput-charset=UTF-8 -DKB_LAY_TEST -O2 -o kb_lay_test.exe src\kb_lay.c
 kb_lay_test.exe
 ```
@@ -67,7 +68,7 @@ Or `build.bat`.
 **MSVC**
 
 ```bat
-cl /nologo /utf-8 /O1 /W3 src\kb_lay.c /Fe:kb_lay.exe user32.lib shell32.lib advapi32.lib /link /SUBSYSTEM:WINDOWS
+cl /nologo /utf-8 /O1 /W3 src\kb_lay.c res\kb_lay.rc /Fe:kb_lay.exe user32.lib shell32.lib advapi32.lib /link /SUBSYSTEM:WINDOWS
 cl /nologo /utf-8 /O1 /W3 /DKB_LAY_TEST src\kb_lay.c /Fe:kb_lay_test.exe
 ```
 

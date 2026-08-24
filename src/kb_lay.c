@@ -152,9 +152,13 @@ int main(void)
 #define IDM_INSTALL   10
 #define IDM_UNINSTALL 11
 #define IDM_EXIT      12
+#define IDI_KBLAY     101
 #define MAX_CONVERT   1000000
+#define MAX_CLIP_FMT  48
 
 static HINSTANCE g_inst;
+static HICON g_icon;
+static int g_icon_owned;
 static HWND g_hwnd;
 static UINT g_mods = MOD_NOREPEAT;
 static UINT g_vk = VK_PAUSE;
@@ -256,32 +260,159 @@ static int parse_hotkey(const wchar_t *spec, UINT *mods, UINT *vk)
     return *vk != 0;
 }
 
-static void key_batch_ctrl(WORD vk)
+static void key_event(WORD vk, int down)
 {
-    INPUT in[4];
-    memset(in, 0, sizeof(in));
-    in[0].type = INPUT_KEYBOARD;
-    in[0].ki.wVk = VK_CONTROL;
-    in[0].ki.wScan = (WORD)MapVirtualKeyW(VK_CONTROL, MAPVK_VK_TO_VSC);
-    in[1].type = INPUT_KEYBOARD;
-    in[1].ki.wVk = vk;
-    in[1].ki.wScan = (WORD)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
-    in[2] = in[1];
-    in[2].ki.dwFlags = KEYEVENTF_KEYUP;
-    in[3] = in[0];
-    in[3].ki.dwFlags = KEYEVENTF_KEYUP;
-    SendInput(4, in, sizeof(INPUT));
+    INPUT in;
+    memset(&in, 0, sizeof(in));
+    in.type = INPUT_KEYBOARD;
+    in.ki.wVk = vk;
+    in.ki.wScan = (WORD)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+    in.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
+    SendInput(1, &in, sizeof(INPUT));
+}
+
+static void release_modifiers(void)
+{
+    static const WORD k[] = {
+        VK_LCONTROL, VK_RCONTROL, VK_CONTROL,
+        VK_LSHIFT, VK_RSHIFT, VK_SHIFT,
+        VK_LMENU, VK_RMENU, VK_MENU,
+        VK_LWIN, VK_RWIN
+    };
+    unsigned i;
+    for (i = 0; i < sizeof(k) / sizeof(k[0]); i++)
+        key_event(k[i], 0);
+}
+
+static void send_ctrl_vk(WORD vk)
+{
+    release_modifiers();
+    Sleep(8);
+    key_event(VK_LCONTROL, 1);
+    Sleep(15);
+    key_event(vk, 1);
+    Sleep(15);
+    key_event(vk, 0);
+    Sleep(15);
+    key_event(VK_LCONTROL, 0);
+    Sleep(12);
 }
 
 static int clip_open(void)
 {
     int i;
-    for (i = 0; i < 25; i++) {
-        if (OpenClipboard(g_hwnd))
+    for (i = 0; i < 40; i++) {
+        if (OpenClipboard(NULL))
             return 1;
-        Sleep(8);
+        Sleep(10);
     }
     return 0;
+}
+
+typedef struct ClipItem {
+    UINT fmt;
+    HGLOBAL mem;
+} ClipItem;
+
+typedef struct ClipSnap {
+    ClipItem item[MAX_CLIP_FMT];
+    int n;
+} ClipSnap;
+
+static void clip_snap_free(ClipSnap *s)
+{
+    int i;
+    if (!s)
+        return;
+    for (i = 0; i < s->n; i++) {
+        if (s->item[i].mem)
+            GlobalFree(s->item[i].mem);
+    }
+    free(s);
+}
+
+static ClipSnap *clip_save(void)
+{
+    ClipSnap *s;
+    UINT fmt = 0;
+    if (!clip_open())
+        return NULL;
+    s = (ClipSnap *)calloc(1, sizeof(*s));
+    if (!s) {
+        CloseClipboard();
+        return NULL;
+    }
+    while (s->n < MAX_CLIP_FMT && (fmt = EnumClipboardFormats(fmt)) != 0) {
+        HANDLE h;
+        void *src, *dst;
+        SIZE_T n;
+        if (fmt == CF_BITMAP || fmt == CF_PALETTE || fmt == CF_OWNERDISPLAY ||
+            fmt == CF_DSPBITMAP || fmt == CF_ENHMETAFILE || fmt == CF_METAFILEPICT)
+            continue;
+        h = GetClipboardData(fmt);
+        if (!h)
+            continue;
+        n = GlobalSize(h);
+        src = GlobalLock(h);
+        if (!src || n == 0) {
+            if (src)
+                GlobalUnlock(h);
+            continue;
+        }
+        s->item[s->n].mem = GlobalAlloc(GMEM_MOVEABLE, n);
+        if (!s->item[s->n].mem) {
+            GlobalUnlock(h);
+            continue;
+        }
+        dst = GlobalLock(s->item[s->n].mem);
+        if (!dst) {
+            GlobalFree(s->item[s->n].mem);
+            GlobalUnlock(h);
+            continue;
+        }
+        memcpy(dst, src, n);
+        GlobalUnlock(s->item[s->n].mem);
+        GlobalUnlock(h);
+        s->item[s->n].fmt = fmt;
+        s->n++;
+    }
+    CloseClipboard();
+    return s;
+}
+
+static void clip_restore(ClipSnap *s)
+{
+    int i;
+    if (!s)
+        return;
+    if (!clip_open()) {
+        clip_snap_free(s);
+        return;
+    }
+    EmptyClipboard();
+    for (i = 0; i < s->n; i++) {
+        if (!s->item[i].mem)
+            continue;
+        if (SetClipboardData(s->item[i].fmt, s->item[i].mem))
+            s->item[i].mem = NULL;
+    }
+    CloseClipboard();
+    clip_snap_free(s);
+}
+
+static HWND focused_hwnd(void)
+{
+    HWND fg = GetForegroundWindow();
+    GUITHREADINFO gi;
+    memset(&gi, 0, sizeof(gi));
+    gi.cbSize = sizeof(gi);
+    if (fg && GetGUIThreadInfo(GetWindowThreadProcessId(fg, NULL), &gi)) {
+        if (gi.hwndFocus)
+            return gi.hwndFocus;
+        if (gi.hwndActive)
+            return gi.hwndActive;
+    }
+    return fg;
 }
 
 static wchar_t *clip_dup_opened(void)
@@ -372,53 +503,124 @@ static void set_layout(int ru)
         PostMessageW(fg, WM_INPUTLANGCHANGEREQUEST, 0, (LPARAM)hkl);
 }
 
-static void convert_selection(void)
+static void convert_selection(HWND force)
 {
-    DWORD seq;
+    ClipSnap *snap;
+    HWND tgt, fg;
+    DWORD my, tid = 0, seq;
+    int attached = 0, via_msg = 0, to_ru, i;
     wchar_t *cur = NULL;
-    int i, to_ru;
-    HWND fg;
 
     if (g_busy)
         return;
     g_busy = 1;
 
+    snap = clip_save();
+
     fg = GetForegroundWindow();
+    tgt = force ? force : focused_hwnd();
+    my = GetCurrentThreadId();
     if (fg)
+        tid = GetWindowThreadProcessId(fg, NULL);
+    if (tid && tid != my)
+        attached = AttachThreadInput(my, tid, TRUE) ? 1 : 0;
+    if (!force && fg)
         SetForegroundWindow(fg);
 
     seq = GetClipboardSequenceNumber();
-    key_batch_ctrl('C');
-
-    for (i = 0; i < 40; i++) {
-        Sleep(15);
-        if (GetClipboardSequenceNumber() != seq)
-            break;
+    if (tgt) {
+        SendMessageTimeoutW(tgt, WM_COPY, 0, 0, SMTO_ABORTIFHUNG, 100, NULL);
+        for (i = 0; i < 8; i++) {
+            Sleep(10);
+            if (GetClipboardSequenceNumber() != seq) {
+                via_msg = 1;
+                break;
+            }
+        }
     }
+    if (!via_msg) {
+        send_ctrl_vk('C');
+        for (i = 0; i < 50; i++) {
+            Sleep(12);
+            if (GetClipboardSequenceNumber() != seq)
+                break;
+        }
+    }
+
     if (GetClipboardSequenceNumber() == seq) {
+        clip_restore(snap);
+        if (attached)
+            AttachThreadInput(my, tid, FALSE);
         g_busy = 0;
         return;
     }
 
     cur = clip_get();
     if (!cur || !cur[0]) {
+        clip_restore(snap);
         free(cur);
+        if (attached)
+            AttachThreadInput(my, tid, FALSE);
         g_busy = 0;
         return;
     }
 
     to_ru = decide_to_ru(cur);
     if (to_ru < 0 || !convert_inplace(cur) || !clip_set(cur)) {
+        clip_restore(snap);
         free(cur);
+        if (attached)
+            AttachThreadInput(my, tid, FALSE);
         g_busy = 0;
         return;
     }
 
-    key_batch_ctrl('V');
-    set_layout(to_ru);
+    if (via_msg && tgt)
+        SendMessageTimeoutW(tgt, WM_PASTE, 0, 0, SMTO_ABORTIFHUNG, 100, NULL);
+    else
+        send_ctrl_vk('V');
 
+    set_layout(to_ru);
+    Sleep(force ? 40 : 280);
+
+    clip_restore(snap);
     free(cur);
+    if (attached)
+        AttachThreadInput(my, tid, FALSE);
     g_busy = 0;
+}
+
+static int run_selftest(void)
+{
+    HWND ed;
+    wchar_t buf[64];
+    wchar_t *before, *after;
+    int ok;
+
+    before = clip_get();
+    ed = CreateWindowExW(0, L"EDIT", L"ghbdtn",
+                         WS_OVERLAPPED | ES_AUTOHSCROLL | ES_LEFT,
+                         0, 0, 200, 40, NULL, NULL, g_inst, NULL);
+    if (!ed) {
+        free(before);
+        return 1;
+    }
+    SendMessageW(ed, EM_SETSEL, 0, -1);
+    convert_selection(ed);
+    buf[0] = 0;
+    GetWindowTextW(ed, buf, 64);
+    DestroyWindow(ed);
+    after = clip_get();
+    ok = wcscmp(buf, L"привет") == 0;
+    if (before || after) {
+        if ((before && after && wcscmp(before, after) != 0) ||
+            (!before && after && after[0]) ||
+            (before && before[0] && !after))
+            ok = 0;
+    }
+    free(before);
+    free(after);
+    return ok ? 0 : 1;
 }
 
 static HWND find_instance(void)
@@ -560,7 +762,16 @@ static void tray_add(void)
     nid.uID = 1;
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY;
-    nid.hIcon = LoadIconW(NULL, MAKEINTRESOURCEW(32512));
+    if (!g_icon) {
+        g_icon = (HICON)LoadImageW(
+            g_inst, MAKEINTRESOURCEW(IDI_KBLAY), IMAGE_ICON,
+            GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
+        if (g_icon)
+            g_icon_owned = 1;
+        else
+            g_icon = LoadIconW(NULL, MAKEINTRESOURCEW(32512));
+    }
+    nid.hIcon = g_icon;
     wcopy(nid.szTip, 128, L"kb_lay  [");
     wcat(nid.szTip, 128, g_hotkey_spec);
     wcat(nid.szTip, 128, L"]  convert selection EN/RU");
@@ -575,6 +786,10 @@ static void tray_del(void)
     nid.hWnd = g_hwnd;
     nid.uID = 1;
     Shell_NotifyIconW(NIM_DELETE, &nid);
+    if (g_icon_owned && g_icon)
+        DestroyIcon(g_icon);
+    g_icon = NULL;
+    g_icon_owned = 0;
 }
 
 static void show_menu(void)
@@ -599,7 +814,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_HOTKEY:
         if (wp == ID_HOTKEY)
-            convert_selection();
+            convert_selection(NULL);
         return 0;
     case WM_TRAY:
         if (lp == WM_RBUTTONUP || lp == WM_CONTEXTMENU)
@@ -648,6 +863,8 @@ static int run_resident(void)
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = g_inst;
+    wc.hIcon = LoadIconW(g_inst, MAKEINTRESOURCEW(IDI_KBLAY));
+    wc.hIconSm = wc.hIcon;
     wc.lpszClassName = CLASS_NAME;
     if (!RegisterClassExW(&wc))
         return 1;
@@ -682,7 +899,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR raw, int show)
 {
     int argc = 0, i;
     LPWSTR *argv;
-    int do_install_ = 0, do_uninst = 0, do_quit = 0, do_help = 0;
+    int do_install_ = 0, do_uninst = 0, do_quit = 0, do_help = 0, do_selftest = 0;
 
     (void)prev;
     (void)raw;
@@ -701,6 +918,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR raw, int show)
             else if (!lstrcmpiW(argv[i], L"--help") || !lstrcmpiW(argv[i], L"-h") ||
                      !lstrcmpiW(argv[i], L"/?"))
                 do_help = 1;
+            else if (!lstrcmpiW(argv[i], L"--selftest"))
+                do_selftest = 1;
             else if (!wcsncmp(argv[i], L"--hotkey=", 9)) {
                 wcopy(g_hotkey_spec, 64, argv[i] + 9);
                 if (!parse_hotkey(g_hotkey_spec, &g_mods, &g_vk)) {
@@ -717,6 +936,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR raw, int show)
         show_help();
         return 0;
     }
+    if (do_selftest)
+        return run_selftest();
     if (do_quit) {
         quit_instance();
         return 0;
