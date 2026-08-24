@@ -12,10 +12,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
       - name: Test
-        run: |
-          cl /nologo /utf-8 /O1 /W3 /DKB_LAY_TEST src\kb_lay.c /Fe:kb_lay_test.exe
-          .\kb_lay_test.exe
+        shell: cmd
+        run: cl /nologo /utf-8 /O1 /W3 /DKB_LAY_TEST src\kb_lay.c /Fe:kb_lay_test.exe && kb_lay_test.exe
       - name: Build
+        shell: cmd
         run: cl /nologo /utf-8 /O1 /W3 src\kb_lay.c /Fe:kb_lay.exe user32.lib shell32.lib advapi32.lib /link /SUBSYSTEM:WINDOWS
       - uses: actions/upload-artifact@v4
         with:

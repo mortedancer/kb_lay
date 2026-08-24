@@ -36,7 +36,7 @@ static const wchar_t RU[] =
     L"ФЫВАПРОЛДЖЭ"
     L"ЯЧСМИТЬБЮ,";
 
-_Static_assert(sizeof(EN) == sizeof(RU), "EN/RU keymap length mismatch");
+typedef char kb_lay_map_eq[(sizeof(EN) == sizeof(RU)) ? 1 : -1];
 
 static int is_lat(wchar_t c)
 {
