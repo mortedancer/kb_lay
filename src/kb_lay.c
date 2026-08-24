@@ -144,6 +144,10 @@ int main(void)
 #include <windows.h>
 #include <shellapi.h>
 
+#ifndef LLKHF_INJECTED
+#define LLKHF_INJECTED 0x10
+#endif
+
 #define CLASS_NAME L"kb_lay.Hidden"
 #define MUTEX_NAME L"Local\\kb_lay.instance"
 #define RUN_VALUE  L"kb_lay"
@@ -155,15 +159,29 @@ int main(void)
 #define IDI_KBLAY     101
 #define MAX_CONVERT   1000000
 #define MAX_CLIP_FMT  48
+#define DBL_TAP_MS    500
+
+#define HK_REGISTER   0
+#define HK_DBL_CTRL   1
+#define HK_DBL_LCTRL  2
+#define HK_DBL_RCTRL  3
+#define HK_DBL_ALT    4
+#define HK_DBL_SHIFT  5
+#define HK_CAPS       6
 
 static HINSTANCE g_inst;
 static HICON g_icon;
 static int g_icon_owned;
 static HWND g_hwnd;
+static HHOOK g_hook;
 static UINT g_mods = MOD_NOREPEAT;
-static UINT g_vk = VK_PAUSE;
-static wchar_t g_hotkey_spec[64] = L"pause";
+static UINT g_vk;
+static int g_hk_mode = HK_DBL_CTRL;
+static wchar_t g_hotkey_spec[64] = L"ctrl+ctrl";
 static int g_busy;
+static DWORD g_tap_at;
+static int g_tap_class;
+static int g_chord_dirty;
 
 static void wcopy(wchar_t *dst, size_t cap, const wchar_t *src)
 {
@@ -227,14 +245,62 @@ static int parse_vk_name(const wchar_t *tok, UINT *vk)
     return 0;
 }
 
-static int parse_hotkey(const wchar_t *spec, UINT *mods, UINT *vk)
+static void strip_space_hyphen(wchar_t *s)
+{
+    wchar_t *d = s;
+    for (; *s; s++) {
+        if (*s == L' ')
+            continue;
+        if (*s == L'-')
+            *d++ = L'+';
+        else
+            *d++ = *s;
+    }
+    *d = 0;
+}
+
+static int parse_hotkey(const wchar_t *spec)
 {
     wchar_t buf[64];
     wchar_t *tok, *plus, *end;
     wcopy(buf, 64, spec);
     to_lower_ascii(buf);
-    *mods = MOD_NOREPEAT;
-    *vk = 0;
+    strip_space_hyphen(buf);
+
+    g_mods = MOD_NOREPEAT;
+    g_vk = 0;
+    if (!wcscmp(buf, L"ctrl+ctrl") || !wcscmp(buf, L"ctrlctrl") ||
+        !wcscmp(buf, L"doublectrl") || !wcscmp(buf, L"dblctrl") ||
+        !wcscmp(buf, L"2ctrl")) {
+        g_hk_mode = HK_DBL_CTRL;
+        return 1;
+    }
+    if (!wcscmp(buf, L"lctrl+lctrl") || !wcscmp(buf, L"leftctrl+leftctrl") ||
+        !wcscmp(buf, L"doublelctrl")) {
+        g_hk_mode = HK_DBL_LCTRL;
+        return 1;
+    }
+    if (!wcscmp(buf, L"rctrl+rctrl") || !wcscmp(buf, L"rightctrl+rightctrl") ||
+        !wcscmp(buf, L"doublerctrl")) {
+        g_hk_mode = HK_DBL_RCTRL;
+        return 1;
+    }
+    if (!wcscmp(buf, L"alt+alt") || !wcscmp(buf, L"doublealt") ||
+        !wcscmp(buf, L"dblalt")) {
+        g_hk_mode = HK_DBL_ALT;
+        return 1;
+    }
+    if (!wcscmp(buf, L"shift+shift") || !wcscmp(buf, L"doubleshift") ||
+        !wcscmp(buf, L"dblshift")) {
+        g_hk_mode = HK_DBL_SHIFT;
+        return 1;
+    }
+    if (!wcscmp(buf, L"caps") || !wcscmp(buf, L"capslock")) {
+        g_hk_mode = HK_CAPS;
+        return 1;
+    }
+
+    g_hk_mode = HK_REGISTER;
     tok = buf;
     while (tok && *tok) {
         plus = wcschr(tok, L'+');
@@ -246,18 +312,105 @@ static int parse_hotkey(const wchar_t *spec, UINT *mods, UINT *vk)
         while (end > tok && end[-1] == L' ')
             *--end = 0;
         if (!wcscmp(tok, L"ctrl") || !wcscmp(tok, L"control"))
-            *mods |= MOD_CONTROL;
+            g_mods |= MOD_CONTROL;
         else if (!wcscmp(tok, L"alt"))
-            *mods |= MOD_ALT;
+            g_mods |= MOD_ALT;
         else if (!wcscmp(tok, L"shift"))
-            *mods |= MOD_SHIFT;
+            g_mods |= MOD_SHIFT;
         else if (!wcscmp(tok, L"win") || !wcscmp(tok, L"windows"))
-            *mods |= MOD_WIN;
-        else if (!parse_vk_name(tok, vk))
+            g_mods |= MOD_WIN;
+        else if (!parse_vk_name(tok, &g_vk))
             return 0;
         tok = plus ? plus + 1 : NULL;
     }
-    return *vk != 0;
+    return g_vk != 0;
+}
+
+static int ctrl_side(DWORD vk, DWORD flags)
+{
+    if (vk == VK_LCONTROL)
+        return 1;
+    if (vk == VK_RCONTROL)
+        return 2;
+    if (vk == VK_CONTROL)
+        return (flags & LLKHF_EXTENDED) ? 2 : 1;
+    return 0;
+}
+
+static int tap_class_of(DWORD vk, DWORD flags)
+{
+    int side;
+    if (g_hk_mode == HK_CAPS)
+        return (vk == VK_CAPITAL) ? HK_CAPS : 0;
+    if (g_hk_mode == HK_DBL_ALT)
+        return (vk == VK_LMENU || vk == VK_RMENU || vk == VK_MENU) ? HK_DBL_ALT : 0;
+    if (g_hk_mode == HK_DBL_SHIFT)
+        return (vk == VK_LSHIFT || vk == VK_RSHIFT || vk == VK_SHIFT) ? HK_DBL_SHIFT : 0;
+    side = ctrl_side(vk, flags);
+    if (!side)
+        return 0;
+    if (g_hk_mode == HK_DBL_LCTRL)
+        return (side == 1) ? HK_DBL_LCTRL : 0;
+    if (g_hk_mode == HK_DBL_RCTRL)
+        return (side == 2) ? HK_DBL_RCTRL : 0;
+    return HK_DBL_CTRL;
+}
+
+static LRESULT CALLBACK ll_kb(int code, WPARAM wp, LPARAM lp)
+{
+    KBDLLHOOKSTRUCT *kb;
+    int cls, down, up;
+    DWORD now;
+
+    if (code != HC_ACTION || !lp)
+        return CallNextHookEx(g_hook, code, wp, lp);
+    kb = (KBDLLHOOKSTRUCT *)lp;
+    if (kb->flags & LLKHF_INJECTED)
+        return CallNextHookEx(g_hook, code, wp, lp);
+    if (g_busy)
+        return CallNextHookEx(g_hook, code, wp, lp);
+
+    down = (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN);
+    up = (wp == WM_KEYUP || wp == WM_SYSKEYUP);
+    cls = tap_class_of(kb->vkCode, kb->flags);
+
+    if (g_hk_mode == HK_CAPS) {
+        if (down && cls == HK_CAPS &&
+            !(GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
+            !(GetAsyncKeyState(VK_CONTROL) & 0x8000) &&
+            !(GetAsyncKeyState(VK_MENU) & 0x8000)) {
+            if (g_hwnd)
+                PostMessageW(g_hwnd, WM_HOTKEY, ID_HOTKEY, 0);
+            return 1;
+        }
+        return CallNextHookEx(g_hook, code, wp, lp);
+    }
+
+    if (down && !cls) {
+        g_chord_dirty = 1;
+        g_tap_at = 0;
+        g_tap_class = 0;
+    }
+    if (down && cls)
+        g_chord_dirty = 0;
+
+    if (up && cls) {
+        if (!g_chord_dirty) {
+            now = GetTickCount();
+            if (g_tap_at && g_tap_class == cls && (now - g_tap_at) <= DBL_TAP_MS) {
+                g_tap_at = 0;
+                g_tap_class = 0;
+                if (g_hwnd)
+                    PostMessageW(g_hwnd, WM_HOTKEY, ID_HOTKEY, 0);
+            } else {
+                g_tap_at = now;
+                g_tap_class = cls;
+            }
+        }
+        g_chord_dirty = 0;
+    }
+
+    return CallNextHookEx(g_hook, code, wp, lp);
 }
 
 static void key_event(WORD vk, int down)
@@ -653,10 +806,8 @@ static void build_run_cmd(wchar_t *cmd, size_t cap, const wchar_t *exe)
     wcopy(cmd, cap, L"\"");
     wcat(cmd, cap, exe);
     wcat(cmd, cap, L"\"");
-    if (g_hotkey_spec[0] && wcscmp(g_hotkey_spec, L"pause") != 0) {
-        wcat(cmd, cap, L" --hotkey=");
-        wcat(cmd, cap, g_hotkey_spec);
-    }
+    wcat(cmd, cap, L" --hotkey=");
+    wcat(cmd, cap, g_hotkey_spec);
 }
 
 static int write_run_key(const wchar_t *cmd)
@@ -714,7 +865,7 @@ static void do_install(void)
     }
     MessageBoxW(
         NULL,
-        L"Installed. Select text and press the hotkey (default: Pause) to convert EN/RU.",
+        L"Installed. Select text and double-tap Ctrl (default) to convert EN/RU.",
         L"kb_lay",
         MB_OK | MB_ICONINFORMATION);
 }
@@ -743,12 +894,12 @@ static void show_help(void)
     MessageBoxW(
         NULL,
         L"kb_lay — convert selected text EN/RU (Windows US <-> Russian).\r\n\r\n"
-        L"Select text, press Pause (default).\r\n\r\n"
+        L"Select text, double-tap Ctrl (default).\r\n\r\n"
         L"kb_lay\r\n"
-        L"kb_lay --install [--hotkey=ctrl+alt+q]\r\n"
+        L"kb_lay --install [--hotkey=ctrl+ctrl]\r\n"
         L"kb_lay --uninstall\r\n"
         L"kb_lay --quit\r\n"
-        L"kb_lay --hotkey=pause|scrolllock|f12|ctrl+shift+q\r\n",
+        L"kb_lay --hotkey=ctrl+ctrl|lctrl+lctrl|rctrl+rctrl|alt+alt|caps|pause|f12\r\n",
         L"kb_lay",
         MB_OK | MB_ICONINFORMATION);
 }
@@ -837,6 +988,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
+        if (g_hook) {
+            UnhookWindowsHookEx(g_hook);
+            g_hook = NULL;
+        }
         UnregisterHotKey(hwnd, ID_HOTKEY);
         tray_del();
         PostQuitMessage(0);
@@ -875,13 +1030,22 @@ static int run_resident(void)
     if (!g_hwnd)
         return 1;
 
-    if (!RegisterHotKey(g_hwnd, ID_HOTKEY, g_mods, g_vk)) {
-        wcopy(err, 160, L"Hotkey '");
-        wcat(err, 160, g_hotkey_spec);
-        wcat(err, 160, L"' is already in use. Try --hotkey=scrolllock");
-        MessageBoxW(NULL, err, L"kb_lay", MB_ICONERROR);
-        DestroyWindow(g_hwnd);
-        return 1;
+    if (g_hk_mode == HK_REGISTER) {
+        if (!RegisterHotKey(g_hwnd, ID_HOTKEY, g_mods, g_vk)) {
+            wcopy(err, 160, L"Hotkey '");
+            wcat(err, 160, g_hotkey_spec);
+            wcat(err, 160, L"' is already in use. Try --hotkey=ctrl+ctrl");
+            MessageBoxW(NULL, err, L"kb_lay", MB_ICONERROR);
+            DestroyWindow(g_hwnd);
+            return 1;
+        }
+    } else {
+        g_hook = SetWindowsHookExW(WH_KEYBOARD_LL, ll_kb, g_inst, 0);
+        if (!g_hook) {
+            MessageBoxW(NULL, L"Could not install keyboard hook.", L"kb_lay", MB_ICONERROR);
+            DestroyWindow(g_hwnd);
+            return 1;
+        }
     }
 
     tray_add();
@@ -922,7 +1086,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR raw, int show)
                 do_selftest = 1;
             else if (!wcsncmp(argv[i], L"--hotkey=", 9)) {
                 wcopy(g_hotkey_spec, 64, argv[i] + 9);
-                if (!parse_hotkey(g_hotkey_spec, &g_mods, &g_vk)) {
+                if (!parse_hotkey(g_hotkey_spec)) {
                     MessageBoxW(NULL, L"Invalid --hotkey", L"kb_lay", MB_ICONERROR);
                     LocalFree(argv);
                     return 1;

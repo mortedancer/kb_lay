@@ -2,7 +2,7 @@
 
 Tiny Windows background process: **select text → press a hotkey → convert between EN/RU keyboard layouts**.
 
-Выделите текст, нажмите **Pause** — раскладка выделенного текста переключается (ghbdtn → привет, руддщ → hello).
+Выделите текст, нажмите **Ctrl, Ctrl** — раскладка выделенного текста переключается (ghbdtn → привет, руддщ → hello).
 
 Idle cost is one hidden window sitting in `GetMessage` (~0% CPU, a few MB of RAM, no .NET, no service host).
 
@@ -21,16 +21,18 @@ So kb_lay is a **user-session resident process** (tray icon). `--install` regist
 ```text
 kb_lay                         run in background
 kb_lay --install               copy to %LOCALAPPDATA%\kb_lay and start with Windows
-kb_lay --install --hotkey=f12  same, with a custom hotkey
+kb_lay --install --hotkey=caps same, with a custom hotkey
 kb_lay --uninstall             remove startup entry and stop
 kb_lay --quit                  stop the running instance
-kb_lay --hotkey=ctrl+alt+q     override hotkey for this run
+kb_lay --hotkey=ctrl+ctrl      override hotkey for this run
 kb_lay --help
 ```
 
-Default hotkey: **Pause**.
+Default hotkey: **double-tap Ctrl** (either side, two taps within 500 ms). Ctrl+C / Ctrl+V are not treated as taps.
 
-Examples: `pause`, `scrolllock`, `capslock`, `f12`, `ctrl+shift+q`, `ctrl+alt+r`, `win+shift+x`.
+Other non-standard options: `lctrl+lctrl`, `rctrl+rctrl`, `alt+alt`, `shift+shift`, `caps` (tap Caps Lock; it will not toggle caps).
+
+Ordinary combos still work: `pause`, `scrolllock`, `f12`, `ctrl+shift+q`, `ctrl+alt+r`, `win+shift+x`.
 
 Right-click the tray icon for install / uninstall / exit.
 
